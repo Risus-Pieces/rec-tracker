@@ -1,0 +1,470 @@
+// Rec Tracker sensor unit: ESP32 + VL53L1X
+// Counts each person who passes the sensor and reports the count and its own
+// health to the Rec Tracker website. Also serves a small status page on the
+// local network, which is handy on a bench or a phone hotspot.
+//
+// Board: ESP32 Dev Module. Library: "VL53L1X" by Pololu.
+// Wiring: VCC->3V3, GND->GND, SCL->22, SDA->21. SHUT and INT unplugged.
+//
+// Before uploading: copy config.example.h to config.h and fill it in.
+
+#include <Wire.h>
+#include <VL53L1X.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include "config.h"   // WiFi name, website address and this unit's token
+#include "certs.h"    // lets the ESP32 verify it is really talking to the website
+
+#define FIRMWARE_VERSION "2.0.0"
+
+// ================= SETTINGS YOU CHANGE =================
+// How much closer than the empty lane something must be to count as a person.
+// Raise it if you get false counts, lower it if people are missed.
+const int TRIGGER_DROP_MM = 200;
+
+// A person must block the beam for this many readings in a row (~33 ms each)
+// to count, and the lane must be clear this many readings in a row before
+// the next person can be counted. Filters out flickers and double counts.
+const int MIN_PRESENT_READINGS = 2;
+const int MIN_CLEAR_READINGS   = 4;
+// =======================================================
+
+const int MAX_RANGE_MM = 1300;   // Short mode limit; "nothing seen" reads as this
+
+// Talking to the website.
+const unsigned long MIN_CHECKIN_GAP_MS = 1000;   // never report more often than this
+const unsigned long RETRY_MS           = 5000;   // wait this long after a failed report
+unsigned long checkInIntervalMs        = 15000;  // the website adjusts this in each reply
+
+VL53L1X sensor;
+WebServer server(80);
+
+// The sensor loop runs on one processor core and the website reporting on the
+// other, so a slow internet request can never make the sensor miss a person.
+// Everything marked volatile is shared between the two.
+volatile int  baselineMm  = MAX_RANGE_MM;  // distance to the far side of the empty lane
+volatile int  thresholdMm = MAX_RANGE_MM - TRIGGER_DROP_MM;
+volatile int  lastMm      = MAX_RANGE_MM;
+volatile long passCount   = 0;             // shown on the local page; a reset zeroes it
+volatile uint32_t bootTotal = 0;           // people counted since power-on; never zeroed.
+                                           // The website adds up the changes in this.
+volatile bool personPresent = false;
+int  presentStreak = 0;
+int  clearStreak   = 0;
+
+// Health tracking: lets the counter notice a frozen sensor and restart it.
+unsigned long lastReadingMs  = 0;
+unsigned long rateWindowMs   = 0;
+int  readingsInWindow = 0;
+volatile int  readingsPerSec   = 0;
+volatile uint8_t lastStatus    = 0;
+volatile long sensorRestarts   = 0;
+volatile bool sensorOk         = false;
+bool needsCalibration          = true;
+
+// Commands from the website.
+volatile bool     calibrateRequested = false;
+volatile uint32_t calibrateCommandId = 0;
+volatile uint32_t doneCommandId      = 0;   // highest command finished; reported back
+uint32_t lastCommandId               = 0;   // highest command received
+
+// Website link status, for the local page and the Serial Monitor.
+volatile bool serverOk       = false;
+volatile int  lastHttpCode   = 0;
+volatile long recOccupancy   = -1;
+uint32_t bootId              = 0;
+
+// ---------- Sensor ----------
+
+// Starts (or restarts) the sensor in continuous mode. Returns false if it
+// doesn't answer on the I2C wires.
+bool startSensor() {
+  sensor.setTimeout(500);
+  if (!sensor.init()) return false;
+  sensor.setDistanceMode(VL53L1X::Short);
+  sensor.setMeasurementTimingBudget(33000);
+  sensor.startContinuous(33);
+  return true;
+}
+
+const char* statusName(uint8_t s) {
+  switch (s) {
+    case VL53L1X::RangeValid:                return "valid";
+    case VL53L1X::SigmaFail:                 return "noisy reading";
+    case VL53L1X::SignalFail:                return "nothing seen";
+    case VL53L1X::RangeValidMinRangeClipped: return "valid (very close)";
+    case VL53L1X::OutOfBoundsFail:           return "out of range";
+    case VL53L1X::HardwareFail:              return "hardware fail";
+    case VL53L1X::WrapTargetFail:            return "target too far";
+    case VL53L1X::MinRangeFail:              return "too close";
+    default:                                 return "other";
+  }
+}
+
+// Returns true when a new reading is available and puts it in mm.
+// Readings where the sensor sees nothing in range become MAX_RANGE_MM.
+bool getReading(int &mm) {
+  if (!sensor.dataReady()) return false;
+  sensor.read(false);
+  uint8_t status = sensor.ranging_data.range_status;
+  lastStatus = status;
+  if (status == VL53L1X::RangeValid || status == VL53L1X::RangeValidMinRangeClipped) {
+    mm = min((int)sensor.ranging_data.range_mm, MAX_RANGE_MM);
+  } else {
+    mm = MAX_RANGE_MM;
+  }
+  return true;
+}
+
+// Measures the empty lane for 2 seconds and sets the trigger distance.
+// Keep the lane clear while this runs.
+void calibrate() {
+  Serial.println("Calibrating: keep the lane clear for 2 seconds...");
+  long total = 0;
+  int samples = 0;
+  unsigned long start = millis();
+  while (millis() - start < 2000) {
+    int mm;
+    if (getReading(mm)) { total += mm; samples++; }
+    delay(1);
+  }
+  baselineMm  = samples > 0 ? total / samples : MAX_RANGE_MM;
+  thresholdMm = max(baselineMm - TRIGGER_DROP_MM, 80);
+  personPresent = false;
+  presentStreak = 0;
+  clearStreak = 0;
+  lastReadingMs = millis();   // calibration counts as activity, avoids a false restart
+  Serial.printf("Empty lane: %d mm. Counting anything closer than %d mm.\n",
+                (int)baselineMm, (int)thresholdMm);
+}
+
+// Turns raw distances into counts. A person is counted once,
+// at the moment they leave the beam.
+void updateCounter(int mm) {
+  lastMm = mm;
+  if (!personPresent) {
+    if (mm < thresholdMm) {
+      if (++presentStreak >= MIN_PRESENT_READINGS) {
+        personPresent = true;
+        clearStreak = 0;
+      }
+    } else {
+      presentStreak = 0;
+    }
+  } else {
+    if (mm > thresholdMm + 50) {          // 50 mm buffer stops flicker at the edge
+      if (++clearStreak >= MIN_CLEAR_READINGS) {
+        personPresent = false;
+        presentStreak = 0;
+        passCount = passCount + 1;
+        bootTotal = bootTotal + 1;
+        Serial.printf("Person counted. Total: %ld\n", (long)passCount);
+      }
+    } else {
+      clearStreak = 0;
+    }
+  }
+}
+
+// ---------- Reporting to the website ----------
+
+WiFiClientSecure tls;
+HTTPClient http;
+
+void runCommand(uint32_t id, const String &type) {
+  if (id <= lastCommandId) return;   // already received; the website repeats until we confirm
+  lastCommandId = id;
+  if (type == "calibrate") {
+    Serial.println("Website asked for a recalibration.");
+    calibrateCommandId = id;
+    calibrateRequested = true;        // the sensor loop does it and then confirms
+    return;
+  }
+  if (type == "reset") {
+    passCount = 0;
+    Serial.println("Website reset the count.");
+  }
+  if (id > doneCommandId) doneCommandId = id;
+}
+
+// Sends one report and handles the reply. Returns true if the website took it.
+bool checkIn(uint32_t &sentTotal, uint32_t &sentAck) {
+  uint32_t total = bootTotal;
+  uint32_t ack = doneCommandId;
+
+  char body[448];
+  snprintf(body, sizeof(body),
+           "{\"boot\":\"%08x\",\"total\":%u,\"count\":%ld,\"mm\":%d,\"baseline\":%d,\"threshold\":%d,"
+           "\"present\":%s,\"rate\":%d,\"sensor_ok\":%s,\"status\":\"%s\",\"restarts\":%ld,"
+           "\"uptime_s\":%u,\"rssi\":%d,\"fw\":\"" FIRMWARE_VERSION "\",\"ack\":%u}",
+           (unsigned)bootId, (unsigned)total, (long)passCount, (int)lastMm, (int)baselineMm, (int)thresholdMm,
+           personPresent ? "true" : "false", (int)readingsPerSec, sensorOk ? "true" : "false",
+           statusName(lastStatus), (long)sensorRestarts,
+           (unsigned)(esp_timer_get_time() / 1000000), (int)WiFi.RSSI(), (unsigned)ack);
+
+  if (!http.begin(tls, String(SERVER_URL) + "/api/device/checkin")) {
+    lastHttpCode = -1;
+    return false;
+  }
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
+  int code = http.POST(body);
+  String reply = code > 0 ? http.getString() : String();
+  http.end();
+  lastHttpCode = code;
+  if (code != 200) return false;
+
+  sentTotal = total;
+  sentAck = ack;
+
+  // The reply looks like:
+  // {"ok":true,"occupancy":12,"interval_ms":15000,"commands":[{"id":6,"type":"calibrate"}]}
+  int at = reply.indexOf("\"occupancy\":");
+  if (at >= 0) recOccupancy = reply.substring(at + 12).toInt();
+  at = reply.indexOf("\"interval_ms\":");
+  if (at >= 0) checkInIntervalMs = constrain(reply.substring(at + 14).toInt(), 1000L, 60000L);
+
+  int pos = reply.indexOf("\"commands\":");
+  while (pos >= 0 && (pos = reply.indexOf("{\"id\":", pos)) >= 0) {
+    uint32_t id = strtoul(reply.c_str() + pos + 6, nullptr, 10);
+    int typeAt = reply.indexOf("\"type\":\"", pos);
+    if (typeAt < 0) break;
+    int typeEnd = reply.indexOf('"', typeAt + 8);
+    if (typeEnd < 0) break;
+    runCommand(id, reply.substring(typeAt + 8, typeEnd));
+    pos = typeEnd;
+  }
+  return true;
+}
+
+// Runs forever on the second core: keeps WiFi up and reports to the website
+// on a schedule, or right away when the count changes.
+void networkTask(void *) {
+  bool wasConnected = false;
+  bool firstReport = true;
+  unsigned long lastWifiRetry = millis();
+  unsigned long lastCheckInMs = 0;
+  uint32_t sentTotal = 0;
+  uint32_t sentAck = 0;
+
+  tls.setCACert(ROOT_CERTIFICATES);
+  http.setReuse(true);            // keep the secure connection open between reports
+  http.setConnectTimeout(8000);
+  http.setTimeout(8000);
+
+  for (;;) {
+    bool connected = WiFi.status() == WL_CONNECTED;
+    if (connected && !wasConnected) {
+      Serial.print("WiFi connected. Local status page: http://");
+      Serial.println(WiFi.localIP());
+      Serial.printf("Signal strength: %d dBm (better than -70 is fine)\n", WiFi.RSSI());
+      if (MDNS.begin("peoplecounter")) Serial.println("Or try: http://peoplecounter.local");
+    }
+    if (!connected && wasConnected) {
+      Serial.println("WiFi dropped. Still counting; reconnecting...");
+      serverOk = false;
+    }
+    wasConnected = connected;
+
+    if (!connected) {
+      // If auto-reconnect hasn't fixed it, try again every 10 s.
+      if (millis() - lastWifiRetry > 10000) {
+        lastWifiRetry = millis();
+        WiFi.reconnect();
+      }
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
+
+    unsigned long since = millis() - lastCheckInMs;
+    bool due = since >= (serverOk ? checkInIntervalMs : RETRY_MS);
+    bool news = serverOk && since >= MIN_CHECKIN_GAP_MS &&
+                (bootTotal != sentTotal || doneCommandId != sentAck);
+    if (firstReport || due || news) {
+      firstReport = false;
+      bool ok = checkIn(sentTotal, sentAck);
+      lastCheckInMs = millis();
+      if (ok && !serverOk) Serial.println("Website link is up.");
+      if (!ok && serverOk) Serial.printf("Website link lost (code %d). Still counting; will retry.\n", (int)lastHttpCode);
+      if (!ok && lastHttpCode == 401) Serial.println("The website rejected DEVICE_TOKEN. Check config.h.");
+      serverOk = ok;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+// ---------- Local status page ----------
+
+const char PAGE[] PROGMEM = R"HTML(
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>People Counter</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:24px;
+background:#f4f4f2;color:#1d1d1b;text-align:center}
+.card{max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:28px;
+box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.label{font-size:14px;color:#6b6b66;margin:0}
+.count{font-size:88px;font-weight:600;margin:4px 0 8px;line-height:1}
+.status{display:inline-block;padding:6px 14px;border-radius:999px;font-size:14px;margin-bottom:20px}
+.clear{background:#e3f1e6;color:#21572f}.busy{background:#fbe7d6;color:#7a3a0d}
+.stats{display:flex;justify-content:space-around;font-size:14px;color:#6b6b66;margin-bottom:20px}
+.stats b{display:block;font-size:20px;color:#1d1d1b}
+button{font-size:15px;padding:10px 16px;margin:4px;border-radius:10px;border:1px solid #ccc;
+background:#fff;cursor:pointer}
+.offline{color:#a33;font-size:13px;margin-top:12px;min-height:1em}
+</style></head><body>
+<div class="card">
+  <p class="label">People counted by this unit</p>
+  <div class="count" id="count">-</div>
+  <div class="status clear" id="status">Connecting...</div>
+  <div class="stats">
+    <div><b id="mm">-</b>Live distance (mm)</div>
+    <div><b id="base">-</b>Empty lane (mm)</div>
+  </div>
+  <div class="stats">
+    <div><b id="rate">-</b>Readings/sec</div>
+    <div><b id="sens">-</b>Sensor</div>
+  </div>
+  <div class="stats">
+    <div><b id="web">-</b>Website link</div>
+    <div><b id="rec">-</b>In the Rec</div>
+  </div>
+  <button onclick="post('/reset','Reset this unit\'s count to 0? The website count is not changed.')">Reset count</button>
+  <button onclick="post('/calibrate','Make sure the lane is empty, then press OK.')">Recalibrate</button>
+  <div class="offline" id="offline"></div>
+</div>
+<script>
+async function refresh(){
+  try{
+    const r=await fetch('/data');const d=await r.json();
+    document.getElementById('count').textContent=d.count;
+    document.getElementById('mm').textContent=d.mm;
+    document.getElementById('base').textContent=d.baseline;
+    document.getElementById('rate').textContent=d.rate;
+    document.getElementById('sens').textContent=d.sensorOk?d.status:'Not responding';
+    document.getElementById('web').textContent=d.server?'Connected':'Offline ('+d.http+')';
+    document.getElementById('rec').textContent=d.occupancy<0?'-':d.occupancy;
+    const s=document.getElementById('status');
+    s.textContent=d.present?'Someone in the lane':'Lane clear';
+    s.className='status '+(d.present?'busy':'clear');
+    document.getElementById('offline').textContent='';
+  }catch(e){document.getElementById('offline').textContent='Lost connection to the counter';}
+}
+async function post(url,msg){if(confirm(msg)){await fetch(url,{method:'POST'});refresh();}}
+refresh();setInterval(refresh,500);
+</script></body></html>
+)HTML";
+
+void handleRoot() { server.send_P(200, "text/html", PAGE); }
+
+void handleData() {
+  char json[320];
+  snprintf(json, sizeof(json),
+           "{\"count\":%ld,\"mm\":%d,\"baseline\":%d,\"threshold\":%d,\"present\":%s,"
+           "\"rate\":%d,\"sensorOk\":%s,\"status\":\"%s\",\"restarts\":%ld,"
+           "\"server\":%s,\"http\":%d,\"occupancy\":%ld}",
+           (long)passCount, (int)lastMm, (int)baselineMm, (int)thresholdMm, personPresent ? "true" : "false",
+           (int)readingsPerSec, sensorOk ? "true" : "false", statusName(lastStatus), (long)sensorRestarts,
+           serverOk ? "true" : "false", (int)lastHttpCode, (long)recOccupancy);
+  server.send(200, "application/json", json);
+}
+
+void handleReset() {
+  passCount = 0;
+  Serial.println("Count reset to 0.");
+  server.send(200, "text/plain", "ok");
+}
+
+void handleCalibrate() {
+  calibrate();
+  server.send(200, "text/plain", "ok");
+}
+
+// ---------- Main ----------
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  bootId = esp_random();   // tells the website this is a fresh start, so totals begin again at 0
+
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+  sensorOk = startSensor();
+  lastReadingMs = millis();
+  if (sensorOk) {
+    calibrate();
+    needsCalibration = false;
+  } else {
+    Serial.println("Sensor not found. Check the 4 wires; it will keep trying.");
+  }
+
+  Serial.print("ESP32 MAC address (Rice IT may ask for it): ");
+  WiFi.mode(WIFI_STA);
+  Serial.println(WiFi.macAddress());
+  Serial.printf("Joining WiFi \"%s\"...\n", WIFI_NAME);
+  WiFi.setAutoReconnect(true);
+  if (strlen(WIFI_PASSWORD) > 0) WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
+  else WiFi.begin(WIFI_NAME);   // open network: no password
+
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/reset", HTTP_POST, handleReset);
+  server.on("/calibrate", HTTP_POST, handleCalibrate);
+  server.begin();
+
+  // The main loop runs on core 1, so put the website reporting on core 0.
+  xTaskCreatePinnedToCore(networkTask, "network", 12288, nullptr, 1, nullptr, 0);
+}
+
+void loop() {
+  int mm;
+  if (sensorOk || !needsCalibration) {
+    if (getReading(mm)) {
+      updateCounter(mm);
+      lastReadingMs = millis();
+      readingsInWindow++;
+      sensorOk = true;
+    }
+  }
+
+  // Once a second: update readings/sec and print a status line.
+  if (millis() - rateWindowMs >= 1000) {
+    rateWindowMs = millis();
+    readingsPerSec = readingsInWindow;
+    readingsInWindow = 0;
+    Serial.printf("[%d readings/s] last: %d mm (%s), count: %ld, website: %s\n",
+                  (int)readingsPerSec, (int)lastMm, statusName(lastStatus), (long)passCount,
+                  serverOk ? "ok" : "offline");
+  }
+
+  // If the sensor goes quiet for 1 second, restart it automatically.
+  if (millis() - lastReadingMs > 1000) {
+    sensorOk = false;
+    sensorRestarts = sensorRestarts + 1;
+    Serial.println("No readings for 1 s. Restarting the sensor...");
+    if (startSensor()) {
+      Serial.println("Sensor restarted.");
+      sensorOk = true;
+      if (needsCalibration) {     // it was missing at power-on, so it has never been calibrated
+        calibrate();
+        needsCalibration = false;
+      }
+    } else {
+      Serial.println("Sensor not answering. Check that all 4 wires are pushed on firmly.");
+    }
+    lastReadingMs = millis();   // wait another second before trying again
+  }
+
+  // A recalibration requested from the website.
+  if (calibrateRequested) {
+    calibrateRequested = false;
+    if (sensorOk) calibrate();
+    if (calibrateCommandId > doneCommandId) doneCommandId = calibrateCommandId;
+  }
+
+  server.handleClient();
+}
