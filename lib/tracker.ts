@@ -78,6 +78,12 @@ export interface CheckInReport {
   uptimeS?: number | null;
   rssi?: number | null;
   firmware?: string | null;
+  // Reports that failed since the unit started, and the last failure's code.
+  failures?: number | null;
+  lastError?: number | null;
+  // Why the unit last restarted.
+  resetReason?: string | null;
+  freeHeap?: number | null;
   // Highest command id the device has finished.
   ack?: number;
 }
@@ -117,7 +123,8 @@ export async function checkIn(token: string, report: CheckInReport, now = new Da
          boot_id = $3, boot_total = c.new_total, last_seen_at = $2,
          local_count = $5, distance_mm = $6, baseline_mm = $7, threshold_mm = $8, present = $9,
          readings_per_sec = $10, sensor_ok = $11, sensor_status = $12, sensor_restarts = $13,
-         uptime_s = $14, rssi = $15, firmware = $16
+         uptime_s = $14, rssi = $15, firmware = $16,
+         checkin_failures = $19, last_error = $20, reset_reason = $21, free_heap = $22
        FROM calc c WHERE d.id = c.id
      ),
      signed AS (
@@ -171,6 +178,10 @@ export async function checkIn(token: string, report: CheckInReport, now = new Da
       report.firmware ?? null,
       report.ack ?? 0,
       COMMAND_TTL_S,
+      report.failures ?? null,
+      report.lastError ?? null,
+      report.resetReason ?? null,
+      report.freeHeap ?? null,
     ],
   );
   const row = rows[0];
@@ -246,6 +257,10 @@ export interface AdminDevice {
   uptimeS: number | null;
   rssi: number | null;
   firmware: string | null;
+  checkinFailures: number | null;
+  lastError: number | null;
+  resetReason: string | null;
+  freeHeap: number | null;
   // The newest recalibrate request for this device, if any.
   calibration: { state: "waiting" | "running" | "done" | "expired"; at: string } | null;
 }
@@ -296,6 +311,10 @@ export async function getAdminStatus(now = new Date()): Promise<AdminStatus> {
     uptime_s: string | null;
     rssi: number | null;
     firmware: string | null;
+    checkin_failures: string | null;
+    last_error: number | null;
+    reset_reason: string | null;
+    free_heap: number | null;
     cal_created: Date | null;
     cal_delivered: Date | null;
     cal_completed: Date | null;
@@ -355,6 +374,10 @@ export async function getAdminStatus(now = new Date()): Promise<AdminStatus> {
         uptimeS: toNum(d.uptime_s),
         rssi: d.rssi,
         firmware: d.firmware,
+        checkinFailures: toNum(d.checkin_failures),
+        lastError: d.last_error,
+        resetReason: d.reset_reason,
+        freeHeap: d.free_heap,
         calibration,
       };
     }),

@@ -39,6 +39,10 @@ export async function POST(request: Request) {
     uptimeS: int(body.uptime_s, 0, 1_000_000_000),
     rssi: int(body.rssi, -200, 0),
     firmware: text(body.fw, 20),
+    failures: int(body.fails, 0, 1_000_000_000),
+    lastError: int(body.err, -1000, 1000),
+    resetReason: text(body.reset, 40),
+    freeHeap: int(body.heap, 0, 100_000_000),
     ack: int(body.ack, 0, Number.MAX_SAFE_INTEGER) ?? 0,
   };
 

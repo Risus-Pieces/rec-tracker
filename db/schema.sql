@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS devices (
   firmware        text
 );
 
+-- Added in firmware 2.1: enough to tell why a unit dropped off.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS checkin_failures bigint;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS last_error int;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS reset_reason text;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS free_heap int;
+
 -- Commands wait here until the device's next check-in picks them up.
 CREATE TABLE IF NOT EXISTS commands (
   id           bigserial PRIMARY KEY,

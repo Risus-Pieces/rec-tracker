@@ -203,13 +203,14 @@ describe("status", () => {
     const { token } = await createDevice("Entrance A", "entrance");
     await checkIn(
       token,
-      { boot: "b", total: 2, count: 2, mm: 412, baseline: 980, threshold: 780, present: true, rate: 30, sensorOk: true, status: "valid", restarts: 1, uptimeS: 3600, rssi: -61, firmware: "2.0.0" },
+      { boot: "b", total: 2, count: 2, mm: 412, baseline: 980, threshold: 780, present: true, rate: 30, sensorOk: true, status: "valid", restarts: 1, uptimeS: 3600, rssi: -61, firmware: "2.0.0", failures: 3, lastError: -11, resetReason: "power on", freeHeap: 181000 },
       at(1),
     );
     const status = await getAdminStatus(at(2));
     expect(status.devices[0]).toMatchObject({
       online: true, distanceMm: 412, baselineMm: 980, thresholdMm: 780, present: true,
       readingsPerSec: 30, sensorOk: true, sensorStatus: "valid", sensorRestarts: 1, uptimeS: 3600, rssi: -61, firmware: "2.0.0",
+      checkinFailures: 3, lastError: -11, resetReason: "power on", freeHeap: 181000,
     });
     expect(status.events[0]).toMatchObject({ kind: "count", device: "Entrance A", delta: 2, occupancyAfter: 2 });
   });

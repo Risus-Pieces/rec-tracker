@@ -532,6 +532,13 @@ select {
   font-size: 0.88rem;
 }
 
+.sensor-warning {
+  padding: 0.7rem 0.9rem;
+  border-left: 4px solid var(--amber);
+  background: #fff;
+  font-weight: 500;
+}
+
 .sensor-actions {
   display: flex;
   flex-wrap: wrap;

@@ -259,6 +259,21 @@ function calibrationNote(device: AdminDevice, now: number): string | null {
   }
 }
 
+// What the unit's report error codes mean, in plain words.
+function reportError(code: number | null): string {
+  if (code === null || code === 0) return "";
+  if (code === -1) return "couldn't connect";
+  if (code === -11) return "no reply in time";
+  if (code === -5 || code === -4) return "connection dropped";
+  if (code === -2 || code === -3) return "couldn't send";
+  if (code === 401) return "token rejected";
+  if (code >= 500) return "website error";
+  return `code ${code}`;
+}
+
+// An "empty lane" this short means something was in front of the sensor.
+const BLOCKED_LANE_MM = 300;
+
 function SensorCard({
   device,
   now,
@@ -279,6 +294,8 @@ function SensorCard({
   const note = calibrationNote(device, now);
   const calibrating = device.calibration?.state === "waiting" || device.calibration?.state === "running";
   const show = (value: number | string | null, unit = "") => (value === null ? "–" : `${value}${unit}`);
+  const blocked = device.baselineMm !== null && device.baselineMm < BLOCKED_LANE_MM;
+  const lastError = reportError(device.lastError);
 
   return (
     <article className="panel">
@@ -329,7 +346,20 @@ function SensorCard({
             <Reading label="Counted since reset" value={show(device.localCount)} />
             <Reading label="WiFi signal" value={show(device.rssi, " dBm")} bad={device.rssi !== null && device.rssi < -80} />
             <Reading label="Running for" value={device.uptimeS === null ? "–" : formatUptime(device.uptimeS)} />
+            <Reading label="Last started because" value={show(device.resetReason)} />
+            <Reading
+              label="Failed reports"
+              value={device.checkinFailures === null ? "–" : `${device.checkinFailures}${lastError && device.checkinFailures > 0 ? ` (${lastError})` : ""}`}
+            />
+            <Reading label="Free memory" value={device.freeHeap === null ? "–" : `${Math.round(device.freeHeap / 1024)} kB`} />
           </dl>
+          {blocked && (
+            <p className="sensor-note sensor-warning">
+              The empty lane measured only {device.baselineMm} mm, so this sensor counts nothing farther than{" "}
+              {device.thresholdMm} mm. Something was in front of it when it calibrated. Point it across the empty lane
+              and press Recalibrate.
+            </p>
+          )}
         </>
       )}
 
@@ -392,6 +422,11 @@ function SensorCard({
             Remove sensor
           </button>
         </div>
+      )}
+      {!editing && !device.online && (
+        <p className="hint" style={{ marginTop: "0.75rem" }}>
+          Recalibrate needs the sensor online: the request is picked up at its next check-in.
+        </p>
       )}
       {device.firmware && <p className="hint" style={{ marginTop: "0.75rem" }}>Firmware {device.firmware}</p>}
     </article>

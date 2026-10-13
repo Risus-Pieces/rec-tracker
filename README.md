@@ -54,8 +54,14 @@ sensor unit (ESP32 + VL53L1X)  --HTTPS-->  website (Next.js on Vercel)  -->  Pos
 5. Open the Serial Monitor at 115200 baud. You should see `WiFi connected` and
    then `Website link is up.` The sensor's card on the admin page turns **Online**.
 
-Keep the lane clear for the first 2 seconds after power-on: that is when the unit
-measures the empty lane.
+The very first time a unit starts it measures the empty lane for 2 seconds, so
+keep the lane clear. It saves that measurement and reuses it after every restart.
+Whenever you move or re-aim the unit, press **Recalibrate** on its card (with the
+lane empty) so it measures again.
+
+If a unit can't reach the website it keeps counting, retries, rejoins WiFi after
+2 minutes, and restarts itself after 5. Counts and calibration survive that
+restart. The sensor's card shows why it last started and how many reports failed.
 
 ## Testing without hardware
 

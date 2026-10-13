@@ -48,6 +48,10 @@ async function checkIn() {
     uptime_s: Math.round((Date.now() - started) / 1000),
     rssi: -58,
     fw: "simulator",
+    fails: 0,
+    err: 0,
+    reset: "simulator",
+    heap: 180000,
     ack,
   };
   const response = await fetch(new URL("/api/device/checkin", site), {

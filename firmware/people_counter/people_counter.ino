@@ -15,10 +15,11 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <Preferences.h>
 #include "config.h"   // WiFi name, website address and this unit's token
 #include "certs.h"    // lets the ESP32 verify it is really talking to the website
 
-#define FIRMWARE_VERSION "2.0.0"
+#define FIRMWARE_VERSION "2.1.0"
 
 // ================= SETTINGS YOU CHANGE =================
 // How much closer than the empty lane something must be to count as a person.
@@ -33,10 +34,16 @@ const int MIN_CLEAR_READINGS   = 4;
 // =======================================================
 
 const int MAX_RANGE_MM = 1300;   // Short mode limit; "nothing seen" reads as this
+const int BLOCKED_LANE_MM = 300; // an "empty lane" shorter than this means something is in the way
 
 // Talking to the website.
 const unsigned long MIN_CHECKIN_GAP_MS = 1000;   // never report more often than this
 const unsigned long RETRY_MS           = 5000;   // wait this long after a failed report
+const uint16_t REPORT_TIMEOUT_MS       = 6000;   // give up on a report that gets no reply
+// If nothing has reached the website for this long, rejoin WiFi from scratch...
+const unsigned long OFFLINE_REJOIN_MS  = 120000;
+// ...and if that doesn't help either, restart the whole unit.
+const unsigned long OFFLINE_RESTART_MS = 300000;
 unsigned long checkInIntervalMs        = 15000;  // the website adjusts this in each reply
 
 VL53L1X sensor;
@@ -54,6 +61,22 @@ volatile uint32_t bootTotal = 0;           // people counted since power-on; nev
 volatile bool personPresent = false;
 int  presentStreak = 0;
 int  clearStreak   = 0;
+
+// Kept in memory that survives a self-restart (though not a power cut), so
+// when the unit restarts itself the website sees the same running total and
+// no counts are lost or counted twice.
+struct SavedState {
+  uint32_t magic;
+  uint32_t bootId;
+  uint32_t bootTotal;
+  long     passCount;
+};
+RTC_NOINIT_ATTR SavedState saved;
+const uint32_t SAVED_MAGIC = 0x52454354;
+
+// The empty-lane distance is stored in flash, so a restart or power cut never
+// re-measures it at a moment when someone might be standing in the lane.
+Preferences prefs;
 
 // Health tracking: lets the counter notice a frozen sensor and restart it.
 unsigned long lastReadingMs  = 0;
@@ -76,6 +99,10 @@ volatile bool serverOk       = false;
 volatile int  lastHttpCode   = 0;
 volatile long recOccupancy   = -1;
 uint32_t bootId              = 0;
+volatile unsigned long lastServerOkMs = 0;   // when the website last accepted a report
+volatile uint32_t reportFailures      = 0;   // failed reports since power-on
+volatile int  lastReportError         = 0;   // the code of the most recent failure
+const char* resetReason               = "unknown";
 
 // ---------- Sensor ----------
 
@@ -86,7 +113,10 @@ bool startSensor() {
   if (!sensor.init()) return false;
   sensor.setDistanceMode(VL53L1X::Short);
   sensor.setMeasurementTimingBudget(33000);
-  sensor.startContinuous(33);
+  // Each reading takes the 33 ms budget plus a little overhead. Asking for one
+  // every 33 ms makes the sensor skip every other slot (about 16 readings/s);
+  // 40 ms gives a steady 25 readings/s.
+  sensor.startContinuous(40);
   return true;
 }
 
@@ -119,6 +149,21 @@ bool getReading(int &mm) {
   return true;
 }
 
+void setBaseline(int mm) {
+  baselineMm  = mm;
+  thresholdMm = max(mm - TRIGGER_DROP_MM, 80);
+}
+
+// Loads the empty-lane distance saved by the last calibration, if there is one.
+bool loadBaseline() {
+  if (!prefs.begin("rectracker", true)) return false;
+  int mm = prefs.getInt("baseline", 0);
+  prefs.end();
+  if (mm < 50 || mm > MAX_RANGE_MM) return false;
+  setBaseline(mm);
+  return true;
+}
+
 // Measures the empty lane for 2 seconds and sets the trigger distance.
 // Keep the lane clear while this runs.
 void calibrate() {
@@ -131,14 +176,20 @@ void calibrate() {
     if (getReading(mm)) { total += mm; samples++; }
     delay(1);
   }
-  baselineMm  = samples > 0 ? total / samples : MAX_RANGE_MM;
-  thresholdMm = max(baselineMm - TRIGGER_DROP_MM, 80);
+  setBaseline(samples > 0 ? total / samples : MAX_RANGE_MM);
+  if (samples > 0 && prefs.begin("rectracker", false)) {
+    prefs.putInt("baseline", baselineMm);
+    prefs.end();
+  }
   personPresent = false;
   presentStreak = 0;
   clearStreak = 0;
   lastReadingMs = millis();   // calibration counts as activity, avoids a false restart
   Serial.printf("Empty lane: %d mm. Counting anything closer than %d mm.\n",
                 (int)baselineMm, (int)thresholdMm);
+  if (baselineMm < BLOCKED_LANE_MM) {
+    Serial.println("That is very close: something was in front of the sensor. Clear the lane and recalibrate.");
+  }
 }
 
 // Turns raw distances into counts. A person is counted once,
@@ -161,6 +212,8 @@ void updateCounter(int mm) {
         presentStreak = 0;
         passCount = passCount + 1;
         bootTotal = bootTotal + 1;
+        saved.passCount = passCount;
+        saved.bootTotal = bootTotal;
         Serial.printf("Person counted. Total: %ld\n", (long)passCount);
       }
     } else {
@@ -185,6 +238,7 @@ void runCommand(uint32_t id, const String &type) {
   }
   if (type == "reset") {
     passCount = 0;
+    saved.passCount = 0;
     Serial.println("Website reset the count.");
   }
   if (id > doneCommandId) doneCommandId = id;
@@ -195,18 +249,22 @@ bool checkIn(uint32_t &sentTotal, uint32_t &sentAck) {
   uint32_t total = bootTotal;
   uint32_t ack = doneCommandId;
 
-  char body[448];
+  char body[576];
   snprintf(body, sizeof(body),
            "{\"boot\":\"%08x\",\"total\":%u,\"count\":%ld,\"mm\":%d,\"baseline\":%d,\"threshold\":%d,"
            "\"present\":%s,\"rate\":%d,\"sensor_ok\":%s,\"status\":\"%s\",\"restarts\":%ld,"
-           "\"uptime_s\":%u,\"rssi\":%d,\"fw\":\"" FIRMWARE_VERSION "\",\"ack\":%u}",
+           "\"uptime_s\":%u,\"rssi\":%d,\"fw\":\"" FIRMWARE_VERSION "\",\"ack\":%u,"
+           "\"fails\":%u,\"err\":%d,\"reset\":\"%s\",\"heap\":%u}",
            (unsigned)bootId, (unsigned)total, (long)passCount, (int)lastMm, (int)baselineMm, (int)thresholdMm,
            personPresent ? "true" : "false", (int)readingsPerSec, sensorOk ? "true" : "false",
            statusName(lastStatus), (long)sensorRestarts,
-           (unsigned)(esp_timer_get_time() / 1000000), (int)WiFi.RSSI(), (unsigned)ack);
+           (unsigned)(esp_timer_get_time() / 1000000), (int)WiFi.RSSI(), (unsigned)ack,
+           (unsigned)reportFailures, (int)lastReportError, resetReason, (unsigned)ESP.getFreeHeap());
 
   if (!http.begin(tls, String(SERVER_URL) + "/api/device/checkin")) {
     lastHttpCode = -1;
+    lastReportError = -1;
+    reportFailures = reportFailures + 1;
     return false;
   }
   http.addHeader("Content-Type", "application/json");
@@ -215,7 +273,11 @@ bool checkIn(uint32_t &sentTotal, uint32_t &sentAck) {
   String reply = code > 0 ? http.getString() : String();
   http.end();
   lastHttpCode = code;
-  if (code != 200) return false;
+  if (code != 200) {
+    lastReportError = code;
+    reportFailures = reportFailures + 1;
+    return false;
+  }
 
   sentTotal = total;
   sentAck = ack;
@@ -240,20 +302,28 @@ bool checkIn(uint32_t &sentTotal, uint32_t &sentAck) {
   return true;
 }
 
+void joinWifi() {
+  if (strlen(WIFI_PASSWORD) > 0) WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
+  else WiFi.begin(WIFI_NAME);   // open network: no password
+}
+
 // Runs forever on the second core: keeps WiFi up and reports to the website
 // on a schedule, or right away when the count changes.
 void networkTask(void *) {
   bool wasConnected = false;
   bool firstReport = true;
   unsigned long lastWifiRetry = millis();
+  unsigned long lastRejoinMs = millis();
+  int wifiRetries = 0;
   unsigned long lastCheckInMs = 0;
-  uint32_t sentTotal = 0;
+  uint32_t sentTotal = bootTotal;   // after a self-restart, start from the kept total
   uint32_t sentAck = 0;
 
   tls.setCACert(ROOT_CERTIFICATES);
-  http.setReuse(true);            // keep the secure connection open between reports
-  http.setConnectTimeout(8000);
-  http.setTimeout(8000);
+  tls.setHandshakeTimeout(10);    // seconds
+  http.setReuse(true);            // keep the secure connection open between fast reports
+  http.setConnectTimeout(REPORT_TIMEOUT_MS);
+  http.setTimeout(REPORT_TIMEOUT_MS);
 
   for (;;) {
     bool connected = WiFi.status() == WL_CONNECTED;
@@ -266,15 +336,36 @@ void networkTask(void *) {
     if (!connected && wasConnected) {
       Serial.println("WiFi dropped. Still counting; reconnecting...");
       serverOk = false;
+      tls.stop();
     }
+    if (connected) wifiRetries = 0;
     wasConnected = connected;
 
     if (!connected) {
-      // If auto-reconnect hasn't fixed it, try again every 10 s.
+      // If auto-reconnect hasn't fixed it, try again every 10 s, and once a
+      // minute drop the connection completely and join from scratch.
       if (millis() - lastWifiRetry > 10000) {
         lastWifiRetry = millis();
-        WiFi.reconnect();
+        if (++wifiRetries % 6 == 0) {
+          Serial.println("Still no WiFi. Joining from scratch...");
+          WiFi.disconnect();
+          joinWifi();
+        } else {
+          WiFi.reconnect();
+        }
       }
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
+
+    // On WiFi but the website has been out of reach for a while: the network
+    // may have quietly stopped passing our traffic. Rejoin it.
+    if (millis() - lastServerOkMs > OFFLINE_REJOIN_MS && millis() - lastRejoinMs > OFFLINE_REJOIN_MS) {
+      lastRejoinMs = millis();
+      Serial.println("Website out of reach for 2 minutes. Rejoining WiFi...");
+      tls.stop();
+      WiFi.disconnect();
+      joinWifi();
       vTaskDelay(pdMS_TO_TICKS(250));
       continue;
     }
@@ -286,7 +377,17 @@ void networkTask(void *) {
     if (firstReport || due || news) {
       firstReport = false;
       bool ok = checkIn(sentTotal, sentAck);
+      if (!ok && lastHttpCode != 401) {
+        // The usual cause is a kept-open connection that has gone stale.
+        // Try once more straight away on a fresh one.
+        tls.stop();
+        ok = checkIn(sentTotal, sentAck);
+      }
       lastCheckInMs = millis();
+      if (ok) lastServerOkMs = millis();
+      // A connection left idle between slow reports goes stale, so only keep
+      // it open while reporting fast.
+      if (!ok || checkInIntervalMs > 5000) tls.stop();
       if (ok && !serverOk) Serial.println("Website link is up.");
       if (!ok && serverOk) Serial.printf("Website link lost (code %d). Still counting; will retry.\n", (int)lastHttpCode);
       if (!ok && lastHttpCode == 401) Serial.println("The website rejected DEVICE_TOKEN. Check config.h.");
@@ -375,6 +476,7 @@ void handleData() {
 
 void handleReset() {
   passCount = 0;
+  saved.passCount = 0;
   Serial.println("Count reset to 0.");
   server.send(200, "text/plain", "ok");
 }
@@ -389,26 +491,55 @@ void handleCalibrate() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  bootId = esp_random();   // tells the website this is a fresh start, so totals begin again at 0
+
+  // Why did we start? After a self-restart or crash, carry on with the kept
+  // counts. After power-on or the EN button, start a fresh running total.
+  esp_reset_reason_t why = esp_reset_reason();
+  bool selfRestart = false;
+  switch (why) {
+    case ESP_RST_POWERON:  resetReason = "power on or EN button"; break;
+    case ESP_RST_SW:       resetReason = "restarted itself";      selfRestart = true; break;
+    case ESP_RST_PANIC:    resetReason = "crashed";               selfRestart = true; break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:      resetReason = "froze (watchdog)";      selfRestart = true; break;
+    case ESP_RST_BROWNOUT: resetReason = "power dipped";          break;
+    default:               resetReason = "other";                 break;
+  }
+  Serial.printf("Rec Tracker sensor, firmware " FIRMWARE_VERSION ". Started because: %s\n", resetReason);
+  if (selfRestart && saved.magic == SAVED_MAGIC) {
+    bootId = saved.bootId;
+    bootTotal = saved.bootTotal;
+    passCount = saved.passCount;
+  } else {
+    bootId = esp_random();   // tells the website this is a fresh start, so totals begin again at 0
+    saved = { SAVED_MAGIC, bootId, 0, 0 };
+  }
 
   Wire.begin(21, 22);
   Wire.setClock(400000);
   sensorOk = startSensor();
   lastReadingMs = millis();
-  if (sensorOk) {
-    calibrate();
+  lastServerOkMs = millis();
+  if (loadBaseline()) {
+    // Calibrated before: keep it. Pressing EN or losing power no longer
+    // re-measures the lane (your hand on the button used to end up as the "lane").
     needsCalibration = false;
-  } else {
-    Serial.println("Sensor not found. Check the 4 wires; it will keep trying.");
+    Serial.printf("Using the saved empty lane: %d mm. Counting anything closer than %d mm.\n",
+                  (int)baselineMm, (int)thresholdMm);
+    Serial.println("If the sensor has moved, press Recalibrate on the admin page.");
+  } else if (sensorOk) {
+    calibrate();             // first ever start: measure now
+    needsCalibration = false;
   }
+  if (!sensorOk) Serial.println("Sensor not found. Check the 4 wires; it will keep trying.");
 
   Serial.print("ESP32 MAC address (Rice IT may ask for it): ");
   WiFi.mode(WIFI_STA);
   Serial.println(WiFi.macAddress());
   Serial.printf("Joining WiFi \"%s\"...\n", WIFI_NAME);
   WiFi.setAutoReconnect(true);
-  if (strlen(WIFI_PASSWORD) > 0) WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
-  else WiFi.begin(WIFI_NAME);   // open network: no password
+  joinWifi();
 
   server.on("/", handleRoot);
   server.on("/data", handleData);
@@ -467,4 +598,13 @@ void loop() {
   }
 
   server.handleClient();
+
+  // Last resort: nothing has reached the website for 5 minutes and rejoining
+  // WiFi didn't help, so restart. Counts and calibration are kept.
+  unsigned long lastOk = lastServerOkMs;
+  if (millis() - lastOk > OFFLINE_RESTART_MS) {
+    Serial.println("Website out of reach for 5 minutes. Restarting...");
+    delay(200);
+    ESP.restart();
+  }
 }
