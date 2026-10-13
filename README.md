@@ -62,7 +62,7 @@ measures the empty lane.
 Add a sensor on the admin page, then run the simulator with its token:
 
 ```bash
-node scripts/simulate-device.mjs https://your-site.vercel.app rt_your_token 4
+node scripts/simulate-device.mjs https://rec-tracker-eta.vercel.app rt_your_token 4
 ```
 
 It "counts" a person every 4 seconds and responds to reset and recalibrate.
