@@ -45,3 +45,8 @@ next-env.d.ts
 
 # firmware secrets
 firmware/people_counter/config.h
+
+# added by the Neon integration installer
+/.agents/
+/.claude/skills/
+/skills-lock.json

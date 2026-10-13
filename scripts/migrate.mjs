@@ -3,7 +3,8 @@
 import { readFile } from "node:fs/promises";
 import pg from "pg";
 
-const url = process.env.DATABASE_URL;
+// Schema changes go over a direct connection when one is available.
+const url = process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL;
 if (!url) {
   console.warn("migrate: DATABASE_URL is not set, skipping.");
   process.exit(0);
