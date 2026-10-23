@@ -204,6 +204,8 @@ export interface PublicStatus {
   changedAt: string;
   sensors: { total: number; online: number };
   lastSeenAt: string | null;
+  // Where "plenty of room" ends and "packed" starts.
+  thresholds: { quietBelow: number; busyFrom: number };
   serverTime: string;
 }
 
@@ -217,8 +219,10 @@ export async function getPublicStatus(now = new Date()): Promise<PublicStatus> {
     total: number;
     online: number;
     last_seen_at: Date | null;
+    quiet_below: number;
+    busy_from: number;
   }>(
-    `SELECT s.occupancy, s.peak, s.peak_at, s.changed_at,
+    `SELECT s.occupancy, s.peak, s.peak_at, s.changed_at, s.quiet_below, s.busy_from,
        (SELECT count(*)::int FROM devices) AS total,
        (SELECT count(*)::int FROM devices
          WHERE last_seen_at > $1::timestamptz - make_interval(secs => $2)) AS online,
@@ -233,6 +237,7 @@ export async function getPublicStatus(now = new Date()): Promise<PublicStatus> {
     changedAt: row.changed_at.toISOString(),
     sensors: { total: row.total, online: row.online },
     lastSeenAt: row.last_seen_at?.toISOString() ?? null,
+    thresholds: { quietBelow: row.quiet_below, busyFrom: row.busy_from },
     serverTime: now.toISOString(),
   };
 }
@@ -459,4 +464,10 @@ export async function queueCalibrate(id: number, now = new Date()): Promise<void
 // already done for today so that moving the time can't wipe the count early.
 export async function setResetTime(resetTime: string, now = new Date()): Promise<void> {
   await query(`UPDATE state SET reset_time = $1::time, last_reset_at = $2 WHERE id = 1`, [resetTime, now]);
+}
+
+// Sets the counts where the public label changes from "plenty of room" to
+// "getting busy" (quietBelow) and from "getting busy" to "packed" (busyFrom).
+export async function setThresholds(quietBelow: number, busyFrom: number): Promise<void> {
+  await query(`UPDATE state SET quiet_below = $1, busy_from = $2 WHERE id = 1`, [quietBelow, busyFrom]);
 }

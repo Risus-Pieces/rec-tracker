@@ -73,6 +73,24 @@ node scripts/simulate-device.mjs https://rec-tracker-eta.vercel.app rt_your_toke
 
 It "counts" a person every 4 seconds and responds to reset and recalibrate.
 
+## History and how busy it is
+
+The public page labels the current count **Plenty of room**, **Getting busy** or
+**Packed**. Set where those switch on the admin page (next to the reset time);
+the defaults (50 and 120) are placeholders until real numbers show what packed
+looks like at the Rec.
+
+`/history` shows any past day, a typical week by weekday and hour (averaged over
+the last 8 weeks), and every day's peak. It is all rebuilt from the log of count
+changes, so it fills in on its own as the sensors run.
+
+To see the charts with made-up data on your own computer (never the real
+database; the script refuses anything but localhost):
+
+```bash
+DATABASE_URL=postgres://localhost/rec_dev node scripts/seed-demo-history.mjs
+```
+
 ## Running the website on your own computer
 
 You need Node.js and a Postgres database.

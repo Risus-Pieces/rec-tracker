@@ -236,8 +236,48 @@ function CountPanel({ status, act }: { status: AdminStatus; act: Act }) {
             Save reset time
           </button>
         </form>
+        <ThresholdsForm thresholds={status.thresholds} act={act} />
       </div>
     </section>
+  );
+}
+
+// Where the public label switches between plenty of room, getting busy and packed.
+function ThresholdsForm({ thresholds, act }: { thresholds: AdminStatus["thresholds"]; act: Act }) {
+  const [quiet, setQuiet] = useState(String(thresholds.quietBelow));
+  const [busy, setBusy] = useState(String(thresholds.busyFrom));
+  const [saved, setSaved] = useState(thresholds);
+  if (thresholds.quietBelow !== saved.quietBelow || thresholds.busyFrom !== saved.busyFrom) {
+    setSaved(thresholds);
+    setQuiet(String(thresholds.quietBelow));
+    setBusy(String(thresholds.busyFrom));
+  }
+  const q = Number(quiet);
+  const b = Number(busy);
+  const valid = Number.isInteger(q) && Number.isInteger(b) && q >= 1 && q < b;
+  const changed = q !== thresholds.quietBelow || b !== thresholds.busyFrom;
+
+  return (
+    <form
+      className="row"
+      onSubmit={(e) => {
+        e.preventDefault();
+        act("setThresholds", { quietBelow: q, busyFrom: b });
+      }}
+    >
+      <label className="field">
+        &ldquo;Plenty of room&rdquo; below
+        <input type="number" min={1} value={quiet} onChange={(e) => setQuiet(e.target.value)} required />
+      </label>
+      <label className="field">
+        &ldquo;Packed&rdquo; from
+        <input type="number" min={2} value={busy} onChange={(e) => setBusy(e.target.value)} required />
+      </label>
+      <button className="btn" disabled={!valid || !changed}>
+        Save busy levels
+      </button>
+      {!valid && <p className="error">The first number has to be smaller than the second.</p>}
+    </form>
   );
 }
 

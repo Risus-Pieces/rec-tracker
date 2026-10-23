@@ -7,6 +7,7 @@ import {
   resetCount,
   rotateToken,
   setResetTime,
+  setThresholds,
   updateDevice,
   type Role,
 } from "@/lib/tracker";
@@ -67,6 +68,16 @@ export async function POST(request: Request) {
       }
       await setResetTime(body.resetTime);
       return Response.json({ ok: true });
+
+    case "setThresholds": {
+      const { quietBelow, busyFrom } = body;
+      const ok = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 10_000;
+      if (!ok(quietBelow) || !ok(busyFrom) || quietBelow >= busyFrom) {
+        return bad("quietBelow and busyFrom must be whole numbers, with quietBelow smaller");
+      }
+      await setThresholds(quietBelow, busyFrom);
+      return Response.json({ ok: true });
+    }
 
     default:
       return bad("unknown action");

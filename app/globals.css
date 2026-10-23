@@ -9,6 +9,9 @@
   --amber: #a85f00;
   --stop: #a92b22;
   --radius: 10px;
+  /* Charts: today's line and the usual pattern behind it. */
+  --series-today: #2a63c6;
+  --series-usual: #7b8597;
 }
 
 * {
@@ -169,7 +172,7 @@ select {
 .public {
   min-height: 100dvh;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr;
   max-width: 62rem;
   margin: 0 auto;
   padding: clamp(1.1rem, 4vw, 2.5rem);
@@ -183,7 +186,10 @@ select {
 }
 
 .public-main {
-  align-self: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: min(68dvh, 44rem);
   padding: 2.5rem 0;
 }
 
@@ -237,6 +243,8 @@ select {
 }
 
 .public-foot {
+  align-self: end;
+  padding-top: 2rem;
   max-width: 34rem;
   font-size: 0.875rem;
   color: var(--slate);
@@ -662,4 +670,492 @@ select {
   margin: 12vh auto 0;
   display: grid;
   gap: 1rem;
+}
+
+/* ---------- How busy ---------- */
+
+.verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  margin-top: 1.5rem;
+}
+
+.busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.9rem 0.45rem 0.75rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--level) 14%, #fff);
+  box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--level) 45%, transparent);
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.busy-quiet {
+  --level: var(--go);
+}
+
+.busy-moderate {
+  --level: var(--amber);
+}
+
+.busy-busy {
+  --level: var(--stop);
+}
+
+.busy-bars {
+  width: 1.15rem;
+  height: 0.9rem;
+}
+
+.busy-bars .on {
+  fill: var(--level);
+}
+
+.busy-bars .off {
+  fill: color-mix(in oklab, var(--level) 22%, #fff);
+}
+
+.usual {
+  max-width: 34rem;
+  color: var(--slate);
+}
+
+.usual strong {
+  color: var(--ink);
+}
+
+/* ---------- Today on the public page ---------- */
+
+.public-today {
+  padding: 0.5rem 0 1rem;
+}
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.more-link,
+.back-link {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.9rem;
+  text-underline-offset: 3px;
+}
+
+.more-link::after {
+  content: " →";
+}
+
+.back-link::before {
+  content: "← ";
+}
+
+.wordmark-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ---------- Day chart ---------- */
+
+.chart {
+  margin: 0;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 1.25rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--slate);
+}
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.key::before {
+  content: "";
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--key);
+}
+
+.key-today {
+  --key: var(--series-today);
+}
+
+.key-usual {
+  --key: var(--series-usual);
+}
+
+.chart-box {
+  position: relative;
+}
+
+.chart-box svg {
+  display: block;
+  touch-action: pan-y;
+}
+
+.chart-box svg:focus-visible {
+  outline-offset: 2px;
+}
+
+.chart .grid {
+  stroke: rgba(10, 30, 63, 0.12);
+  stroke-width: 1;
+}
+
+.chart .tick {
+  fill: var(--slate);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-today,
+.line-usual {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.line-today {
+  stroke: var(--series-today);
+}
+
+.line-usual {
+  stroke: var(--series-usual);
+}
+
+.area-today {
+  fill: var(--series-today);
+  opacity: 0.1;
+}
+
+.dot-today,
+.dot-usual {
+  stroke: var(--steel-hi);
+  stroke-width: 2;
+}
+
+.dot-today {
+  fill: var(--series-today);
+}
+
+.dot-usual {
+  fill: var(--series-usual);
+}
+
+.crosshair {
+  stroke: rgba(10, 30, 63, 0.35);
+  stroke-width: 1;
+}
+
+.tip {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  padding: 0.45rem 0.65rem;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(10, 30, 63, 0.18);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.chart-box .tip {
+  /* Sits above the plot, over the legend, so it never hides the line. */
+  transform: translate(-50%, calc(-100% + 4px));
+}
+
+.tip-above {
+  transform: translate(-50%, calc(-100% - 6px));
+}
+
+.tip-time {
+  color: var(--slate);
+  margin-bottom: 0.15rem;
+}
+
+.tip-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.tip-row strong {
+  font-size: 0.95rem;
+}
+
+.chart-table {
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--slate);
+}
+
+.chart-table summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.chart-table table {
+  margin-top: 0.5rem;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-table th,
+.chart-table td {
+  padding: 0.2rem 1rem 0.2rem 0;
+  text-align: left;
+  font-weight: 400;
+}
+
+.chart-table thead th {
+  font-weight: 600;
+}
+
+/* ---------- History page ---------- */
+
+.history {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: clamp(1.1rem, 4vw, 2.5rem);
+}
+
+.history-title {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 800;
+  font-size: clamp(2.6rem, 9vw, 4.5rem);
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 2rem 0 1.5rem;
+}
+
+.history-section {
+  padding: 1.5rem 0;
+  border-top: 1px solid rgba(10, 30, 63, 0.14);
+}
+
+.section-hint {
+  margin: -0.4rem 0 1rem;
+}
+
+.day-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.day-nav .btn {
+  min-width: 2.4rem;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.day-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  min-width: 13ch;
+  text-align: center;
+}
+
+.day-pick {
+  margin-left: auto;
+}
+
+.day-pick input {
+  padding: 0.4rem 0.55rem;
+}
+
+.is-loading {
+  opacity: 0.45;
+  transition: opacity 150ms;
+}
+
+.history .facts {
+  margin-top: 0.6rem;
+}
+
+.empty {
+  max-width: 34rem;
+}
+
+/* Typical week heat map: darker = busier */
+
+.heatmap {
+  position: relative;
+  margin: 0;
+}
+
+.heatmap-scroll {
+  overflow-x: auto;
+}
+
+.heatmap-grid {
+  display: grid;
+  gap: 2px;
+  min-width: calc(2.6rem + var(--cols) * 1.05rem);
+}
+
+.heatmap-row {
+  display: grid;
+  grid-template-columns: 2.6rem repeat(var(--cols), minmax(1rem, 1fr));
+  gap: 2px;
+}
+
+.heatmap-day,
+.heatmap-hour {
+  font-size: 0.72rem;
+  color: var(--slate);
+}
+
+.heatmap-day {
+  align-self: center;
+}
+
+.heatmap-hour {
+  white-space: nowrap;
+  overflow: visible;
+}
+
+.heatmap-cell {
+  aspect-ratio: 1;
+  min-height: 1rem;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--ink) var(--shade), var(--steel-hi));
+}
+
+.heatmap-cell:hover {
+  outline: 2px solid var(--series-today);
+  outline-offset: 1px;
+}
+
+.heatmap-cell.is-empty {
+  background: repeating-linear-gradient(45deg, rgba(10, 30, 63, 0.08) 0 2px, transparent 2px 5px);
+}
+
+.heatmap-cell.is-now {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+.heatmap-scale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--slate);
+}
+
+.heatmap-ramp {
+  width: 7rem;
+  height: 0.6rem;
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--ink) 8%, var(--steel-hi)),
+    color-mix(in oklab, var(--ink) 92%, var(--steel-hi))
+  );
+}
+
+.heatmap-now-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.heatmap-now-key::before {
+  content: "";
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  outline: 2px solid var(--amber);
+}
+
+/* Every day so far */
+
+.days {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+}
+
+.day-row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr 11rem;
+  align-items: center;
+  gap: 0.9rem;
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  text-align: left;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.day-row:hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.day-row.is-selected {
+  background: #fff;
+  box-shadow: inset 3px 0 0 var(--series-today);
+}
+
+.day-row-bar {
+  height: 0.55rem;
+  border-radius: 0 4px 4px 0;
+  background: rgba(10, 30, 63, 0.07);
+  overflow: hidden;
+}
+
+.day-row-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  background: var(--series-today);
+}
+
+.day-row-peak {
+  color: var(--slate);
+}
+
+.day-row-peak b {
+  color: var(--ink);
+}
+
+@media (max-width: 560px) {
+  .day-row {
+    grid-template-columns: 6.2rem 1fr;
+  }
+
+  .day-row-peak {
+    grid-column: 1 / -1;
+  }
+
+  .day-pick {
+    margin-left: 0;
+  }
 }

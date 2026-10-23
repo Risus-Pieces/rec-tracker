@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS devices (
   firmware        text
 );
 
+-- How busy counts as busy, for the label on the public page. Set on the admin page.
+ALTER TABLE state ADD COLUMN IF NOT EXISTS quiet_below int NOT NULL DEFAULT 50;
+ALTER TABLE state ADD COLUMN IF NOT EXISTS busy_from int NOT NULL DEFAULT 120;
+
 -- Added in firmware 2.1: enough to tell why a unit dropped off.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS checkin_failures bigint;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS last_error int;
