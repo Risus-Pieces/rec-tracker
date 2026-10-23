@@ -242,8 +242,75 @@ select {
   color: var(--slate);
 }
 
-.public-foot p + p {
-  margin-top: 0.35rem;
+.about-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--slate);
+  font-size: 0.875rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.about-link:hover {
+  color: var(--ink);
+}
+
+/* First-visit notice */
+
+.about {
+  width: min(30rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  padding: 1.5rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--steel-hi);
+  color: var(--ink);
+  box-shadow:
+    inset 0 6px 0 var(--ink),
+    0 1rem 3rem rgba(10, 30, 63, 0.35);
+}
+
+.about::backdrop {
+  background: rgba(10, 30, 63, 0.55);
+}
+
+.about h2 {
+  font-family: var(--font-display), sans-serif;
+  font-weight: 800;
+  font-size: 1.7rem;
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+
+.about p {
+  margin-bottom: 0.85rem;
+  font-size: 0.95rem;
+}
+
+.about a {
+  color: inherit;
+  font-weight: 600;
+}
+
+.about-close {
+  width: 100%;
+  margin-top: 0.4rem;
+  padding: 0.7rem 1rem;
+  border: 0;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--steel-hi);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.about-close:hover {
+  background: #16306a;
 }
 
 /* ---------- Admin ---------- */

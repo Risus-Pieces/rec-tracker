@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { PublicStatus } from "@/lib/tracker";
 import { formatClock } from "@/lib/format";
+import { AboutDialog } from "./about-dialog";
 import { DrumCounter } from "./drum-counter";
 
 const POLL_MS = 5000;
@@ -90,8 +91,7 @@ export default function Home() {
       </section>
 
       <footer className="public-foot">
-        <p>Counted by sensors at the turnstiles. It&rsquo;s an estimate, and it starts again from zero every night.</p>
-        <p>A student project, not an official Rice University service.</p>
+        <AboutDialog />
       </footer>
     </main>
   );
